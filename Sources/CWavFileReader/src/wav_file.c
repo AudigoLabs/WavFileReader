@@ -169,11 +169,14 @@ wav_file_result_t wav_file_set_seek(wav_file_handle_t wav_file, double position)
     if (position > wav_file_get_duration(wav_file)) {
         return WAV_FILE_RESULT_INVALID_PARAM;
     }
-    const uint32_t frame_offset = position * wav_file->sample_rate + 0.5;
-    if (frame_offset > wav_file->num_frames) {
+    return wav_file_set_offset(wav_file, position * wav_file->sample_rate + 0.5);
+}
+
+wav_file_result_t wav_file_set_offset(wav_file_handle_t wav_file, uint32_t offset) {
+    if (offset > wav_file->num_frames) {
         return WAV_FILE_RESULT_INVALID_PARAM;
     }
-    if (!seek_abs(wav_file, wav_file->data_offset + frame_offset * wav_file->num_channels * wav_file->bytes_per_sample)) {
+    if (!seek_abs(wav_file, wav_file->data_offset + offset * wav_file->num_channels * wav_file->bytes_per_sample)) {
         return WAV_FILE_RESULT_FILE_ERROR;
     }
     return WAV_FILE_RESULT_SUCCESS;

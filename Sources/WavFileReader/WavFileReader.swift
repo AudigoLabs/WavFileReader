@@ -53,4 +53,11 @@ public class WavFileReader {
         }
     }
 
+    public func setOffset(_ offset: UInt32) throws {
+        let result = wav_file_set_offset(handle, offset)
+        guard result.isSuccess else {
+            throw result.toWavFileReaderError()
+        }
+    }
+
 }

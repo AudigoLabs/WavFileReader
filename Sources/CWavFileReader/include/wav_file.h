@@ -37,6 +37,8 @@ double wav_file_get_duration(wav_file_handle_t wav_file);
 
 wav_file_result_t wav_file_set_seek(wav_file_handle_t, double position);
 
+wav_file_result_t wav_file_set_offset(wav_file_handle_t, uint32_t offset);
+
 uint32_t wav_file_read(wav_file_handle_t wav_file, float* const _Nonnull* _Nonnull data, uint32_t max_num_frames);
 
 void wav_file_close(wav_file_handle_t wav_file);
