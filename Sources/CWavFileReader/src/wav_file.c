@@ -1,6 +1,7 @@
 #include "wav_file.h"
 #include "wav_file_types.h"
 
+#include <Accelerate/Accelerate.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -11,6 +12,7 @@
 #define MIN_NUM_CHANNELS        1
 #define MAX_NUM_CHANNELS        2
 #define MAX_BYTES_PER_SAMPLE    4
+#define READ_BUFFER_SIZE_FRAMES 1024
 
 #define _STR1(S) #S
 #define _STR2(S) _STR1(S)
@@ -27,7 +29,7 @@ struct wav_file {
     uint32_t num_frames;
 };
 
-static bool read(wav_file_handle_t wav_file, void* ptr, size_t length) {
+static bool read_header(wav_file_handle_t wav_file, void* ptr, size_t length) {
     return fread(ptr, length, 1, wav_file->file) == 1;
 }
 
@@ -42,7 +44,7 @@ static bool seek_abs(wav_file_handle_t wav_file, uint32_t position) {
 static wav_file_result_t parse_file(wav_file_handle_t wav_file) {
     // Parse the RIFF header
     wav_riff_chunk_desc_t riff;
-    if (!read(wav_file, &riff, sizeof(riff))) {
+    if (!read_header(wav_file, &riff, sizeof(riff))) {
         LOG_ERROR("Failed to read RIFF header");
         return WAV_FILE_RESULT_FILE_ERROR;
     } else if (memcmp(riff.header.id, "RIFF", 4)) {
@@ -55,7 +57,7 @@ static wav_file_result_t parse_file(wav_file_handle_t wav_file) {
 
     // Parse each sub-chunk
     wav_chunk_header_t chunk_header;
-    while (read(wav_file, &chunk_header, sizeof(chunk_header))) {
+    while (read_header(wav_file, &chunk_header, sizeof(chunk_header))) {
         const long offset_raw = ftell(wav_file->file);
         if (offset_raw < 0) {
             LOG_ERROR("Failed to get file position (errno=%d)", errno);
@@ -74,7 +76,7 @@ static wav_file_result_t parse_file(wav_file_handle_t wav_file) {
             }
         } else if (!memcmp(chunk_header.id, "fmt ", sizeof(chunk_header.id))) {
             wav_fmt_sub_chunk_data_t fmt_data;
-            if (!read(wav_file, &fmt_data, sizeof(fmt_data))) {
+            if (!read_header(wav_file, &fmt_data, sizeof(fmt_data))) {
                 LOG_ERROR("Failed to read fmt sub-chunk data");
                 return WAV_FILE_RESULT_FILE_ERROR;
             } else if (fmt_data.format != FORMAT_PCM) {
@@ -183,20 +185,43 @@ wav_file_result_t wav_file_set_offset(wav_file_handle_t wav_file, uint32_t offse
 }
 
 uint32_t wav_file_read(wav_file_handle_t wav_file, float* const* data, uint32_t max_num_frames) {
-    const float MAX_SAMPLE_VALUE = (uint32_t)(1 << 31);
-    uint8_t frame_buffer[wav_file->bytes_per_sample * 2];
-    for (uint32_t frame = 0; frame < max_num_frames; frame++) {
-        if (fread(frame_buffer, wav_file->bytes_per_sample * 2, 1, wav_file->file) != 1) {
-            return frame;
+    const uint32_t LEFT_SHIFT_AMOUNT = 32 - wav_file->bits_per_sample;
+    const float MAX_SAMPLE_VALUE = (uint32_t)(1 << (wav_file->bits_per_sample - 1));
+    const uint32_t bytes_per_frame = wav_file->bytes_per_sample * wav_file->num_channels;
+    uint8_t read_buffer[bytes_per_frame * READ_BUFFER_SIZE_FRAMES];
+    uint32_t num_frames_read = 0;
+    while (max_num_frames > 0) {
+        const uint32_t chunk_frames = max_num_frames < READ_BUFFER_SIZE_FRAMES ? max_num_frames : READ_BUFFER_SIZE_FRAMES;
+        const size_t frames_read = fread(read_buffer, bytes_per_frame, chunk_frames, wav_file->file);
+        if (frames_read == 0) {
+            break;
         }
         for (uint16_t channel = 0; channel < wav_file->num_channels; channel++) {
-            uint32_t temp = 0;
-            memcpy(&temp, &frame_buffer[wav_file->bytes_per_sample * channel], wav_file->bytes_per_sample);
-            temp <<= (32 - wav_file->bits_per_sample);
-            data[channel][frame] = ((float)(int32_t)temp) / MAX_SAMPLE_VALUE;
+            // Convert the fixed-point data into a float
+            switch (wav_file->bytes_per_sample) {
+                case 1:
+                    vDSP_vflt8((const char*)&read_buffer[channel * wav_file->bytes_per_sample], wav_file->num_channels, &data[channel][num_frames_read], 1, frames_read);
+                    break;
+                case 2:
+                    vDSP_vflt16((const int16_t*)&read_buffer[channel * wav_file->bytes_per_sample], wav_file->num_channels, &data[channel][num_frames_read], 1, frames_read);
+                    break;
+                case 3:
+                    vDSP_vflt24((const vDSP_int24*)&read_buffer[channel * wav_file->bytes_per_sample], wav_file->num_channels, &data[channel][num_frames_read], 1, frames_read);
+                    break;
+                case 4:
+                    vDSP_vflt32((const int32_t*)&read_buffer[channel * wav_file->bytes_per_sample], wav_file->num_channels, &data[channel][num_frames_read], 1, frames_read);
+                    break;
+                default:
+                    LOG_ERROR("Invalid bytes per sample: %u", wav_file->bytes_per_sample);
+                    abort();
+            }
+            // Scale the float data to be within the range [-1,1]
+            vDSP_vsdiv(&data[channel][num_frames_read], 1, &MAX_SAMPLE_VALUE, &data[channel][num_frames_read], 1, frames_read);
         }
+        num_frames_read += frames_read;
+        max_num_frames -= frames_read;
     }
-    return max_num_frames;
+    return num_frames_read;
 }
 
 void wav_file_close(wav_file_handle_t wav_file) {
